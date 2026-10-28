@@ -10,6 +10,7 @@ from typing import (
     Iterable,
     List,
     Optional,
+    overload,
     Sequence,
     Type,
     Union,
@@ -30,6 +31,7 @@ from bs4._typing import (
     _OneElement,
     _PageElementMatchFunction,
     _QueryResults,
+    _RawAttributeValue,
     _RawAttributeValues,
     _RegularExpressionProtocol,
     _StrainableAttribute,
@@ -680,3 +682,193 @@ class SoupStrainer(ElementFilter):
         :meta private:
         """
         return element if self.match(element) else None
+
+
+def _split_classes(classes: str | Iterable[str] | None) -> list[str]:
+    """Converts class specifications into a list of class names.
+
+    Args:
+        classes: A single class name, a whitespace-separated string of class
+            names, an iterable of class names, or None.
+
+    Returns:
+        A list of class name strings. None becomes an empty list.
+    """
+    if classes is None:
+        return []
+    if isinstance(classes, str):
+        return classes.split()
+    return list(classes)
+
+
+class SoupReplacer(object):
+    """Specifies tag name and class attribute changes during document parsing.
+
+    Attributes:
+        og_tag: The name of the target tag to match during parsing.
+        alt_tag: The replacement tag name, or None if the tag name should not
+            change.
+        add_classes: Classes to add to every matching tag.
+        remove_classes: Classes to remove from every matching tag.
+    """
+
+    og_tag: str
+    alt_tag: str | None
+    add_classes: list[str]
+    remove_classes: list[str]
+
+    @overload
+    def __init__(self, og_tag: str, alt_tag: str) -> None:
+        ...
+
+    @overload
+    def __init__(
+        self,
+        tag: str,
+        add_classes: str | Iterable[str],
+        remove_classes: str | Iterable[str],
+    ) -> None:
+        ...
+
+    def __init__(
+        self,
+        og_tag: str,
+        *args: Any,
+        alt_tag: str | None = None,
+        add_classes: str | Iterable[str] | None = None,
+        remove_classes: str | Iterable[str] | None = None,
+    ):
+        """Initializes a SoupReplacer for tag renaming and/or class modification.
+
+        The constructor may be called in either of two ways:
+
+        1. ``SoupReplacer(og_tag, alt_tag)`` renames every ``og_tag`` to
+           ``alt_tag``.
+
+        2. ``SoupReplacer(tag, add_classes, remove_classes)`` adds
+           ``add_classes`` to, and removes ``remove_classes`` from, the
+           ``class`` attribute of every ``tag``.
+
+        Args:
+            og_tag: The name of the tag to match.
+            alt_tag: The new name for matching tags. Defaults to None (keep
+                the original tag name).
+            add_classes: Classes to add to matching tags as a whitespace
+                string or iterable of strings. Defaults to None.
+            remove_classes: Classes to remove from matching tags as a
+                whitespace string or iterable of strings, or "*" to remove all
+                classes. Defaults to None.
+        """
+        if len(args) == 1:
+            alt_tag = args[0]
+        elif len(args) == 2:
+            add_classes, remove_classes = args
+        elif len(args) > 2:
+            raise TypeError(
+                "SoupReplacer takes at most 3 positional arguments "
+                "(og_tag, alt_tag, add_classes, remove_classes)."
+            )
+        self.og_tag = og_tag
+        self.alt_tag = alt_tag
+        self.add_classes = _split_classes(add_classes)
+        self.remove_classes = _split_classes(remove_classes)
+
+    @classmethod
+    def for_tag_replacement(cls, og_tag: str, alt_tag: str) -> SoupReplacer:
+        """Creates a SoupReplacer that renames matching tags.
+
+        Args:
+            og_tag: The name of the tag to be replaced.
+            alt_tag: The name the tag will be replaced with.
+
+        Returns:
+            A SoupReplacer configured to rename og_tag to alt_tag.
+        """
+        return cls(og_tag=og_tag, alt_tag=alt_tag)
+
+    @classmethod
+    def for_class_replacement(
+        cls,
+        tag: str,
+        add_classes: str | Iterable[str] | None = None,
+        remove_classes: str | Iterable[str] | None = None,
+    ) -> SoupReplacer:
+        """Creates a SoupReplacer that modifies the class attribute of tags.
+
+        Args:
+            tag: The name of the tag whose class attribute will be modified.
+            add_classes: Classes to add to every matching tag.
+            remove_classes: Classes to remove from every matching tag, or "*"
+                to remove all classes.
+
+        Returns:
+            A SoupReplacer configured to modify classes on matching tags.
+        """
+        return cls(
+            og_tag=tag,
+            alt_tag=None,
+            add_classes=add_classes,
+            remove_classes=remove_classes,
+        )
+
+    def replace_tag_name(self, name: str) -> str:
+        """Returns the tag name to use for a parsed tag.
+
+        Args:
+            name: The parsed name of the tag.
+
+        Returns:
+            alt_tag if name matches og_tag and alt_tag is set; otherwise name.
+        """
+        if name == self.og_tag and self.alt_tag is not None:
+            return self.alt_tag
+        return name
+
+    def replace_class(self, name: str, attrs: _RawAttributeValues) -> None:
+        """Modifies the class attribute of attrs in place if name matches.
+
+        Args:
+            name: The original name of the tag being processed.
+            attrs: Mutable mapping of the tag's raw attribute values.
+        """
+        if name != self.og_tag:
+            return
+        if not self.add_classes and not self.remove_classes:
+            return
+
+        raw_value: _RawAttributeValue | None = attrs.get("class")
+        classes: list[str]
+        if isinstance(raw_value, str):
+            classes = raw_value.split()
+        elif raw_value is None:
+            classes = []
+        else:
+            # The class attribute might already have been converted into a
+            # list before reaching this method.
+            classes = list(raw_value)
+
+        if self.remove_classes:
+            if self.remove_classes == ["*"]:
+                classes = []
+            else:
+                classes = [
+                    cls for cls in classes if cls not in self.remove_classes
+                ]
+        for cls in self.add_classes:
+            if cls not in classes:
+                classes.append(cls)
+
+        if raw_value is not None or classes:
+            attrs["class"] = " ".join(classes)
+
+    def __repr__(self) -> str:
+        tag_part = (
+            f"{self.og_tag}->{self.alt_tag}"
+            if self.alt_tag is not None
+            else f"tag={self.og_tag}"
+        )
+        return (
+            f"<{self.__class__.__name__} {tag_part} "
+            f"add_classes={self.add_classes} "
+            f"remove_classes={self.remove_classes}>"
+        )

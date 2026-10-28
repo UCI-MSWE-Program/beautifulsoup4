@@ -33,6 +33,7 @@ __all__ = [
     "Tag",
     "TemplateString",
     "ElementFilter",
+    "SoupReplacer",
     "UnicodeDammit",
     "CData",
     "Doctype",
@@ -90,6 +91,7 @@ from .element import (
 from .formatter import Formatter
 from .filter import (
     ElementFilter,
+    SoupReplacer,
     SoupStrainer,
 )
 from typing import (
@@ -180,6 +182,7 @@ class BeautifulSoup(Tag):
     is_xml: bool
     known_xml: Optional[bool]
     parse_only: Optional[SoupStrainer]  #: :meta private:
+    replacer: Optional[SoupReplacer]  #: :meta private:
 
     # These members are only used while parsing markup.
     markup: Optional[_RawMarkup]  #: :meta private:
@@ -212,6 +215,7 @@ class BeautifulSoup(Tag):
         features: Optional[Union[str, Sequence[str]]] = None,
         builder: Optional[Union[TreeBuilder, Type[TreeBuilder]]] = None,
         parse_only: Optional[SoupStrainer] = None,
+        replacer: Optional[SoupReplacer] = None,
         from_encoding: Optional[_Encoding] = None,
         exclude_encodings: Optional[_Encodings] = None,
         element_classes: Optional[Dict[Type[PageElement], Type[PageElement]]] = None,
@@ -239,6 +243,12 @@ class BeautifulSoup(Tag):
          matching the SoupStrainer will be considered. This is useful
          when parsing part of a document that would otherwise be too
          large to fit into memory.
+
+        :param replacer: A SoupReplacer. Any tag whose name matches the
+         SoupReplacer's og_tag will be replaced, during parsing, with
+         the SoupReplacer's alt_tag, and will have the SoupReplacer's
+         remove_classes removed from its class attribute and its
+         add_classes added to its class attribute.
 
         :param from_encoding: A string indicating the encoding of the
          document to be parsed. Pass this in if Beautiful Soup is
@@ -435,6 +445,7 @@ class BeautifulSoup(Tag):
         self.known_xml = self.is_xml
         self._namespaces = dict()
         self.parse_only = parse_only
+        self.replacer = replacer
 
         if hasattr(markup, "read"):  # It's a file-type object.
             markup = markup.read()
@@ -1018,6 +1029,10 @@ class BeautifulSoup(Tag):
         # print("Start tag %s: %s" % (name, attrs))
         self.endData()
 
+        if self.replacer is not None:
+            self.replacer.replace_class(name, attrs)
+            name = self.replacer.replace_tag_name(name)
+
         if (
             self.parse_only
             and len(self.tagStack) <= 1
@@ -1060,6 +1075,8 @@ class BeautifulSoup(Tag):
         """
         # print("End tag: " + name)
         self.endData()
+        if self.replacer is not None:
+            name = self.replacer.replace_tag_name(name)
         self._popToTag(name, nsprefix)
 
     def handle_data(self, data: str) -> None:
