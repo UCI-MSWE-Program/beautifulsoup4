@@ -33,6 +33,7 @@ from bs4._typing import (
     _QueryResults,
     _RawAttributeValue,
     _RawAttributeValues,
+    _RawOrProcessedAttributeValues,
     _RegularExpressionProtocol,
     _StrainableAttribute,
     _StrainableElement,
@@ -704,18 +705,43 @@ def _split_classes(classes: str | Iterable[str] | None) -> list[str]:
 class SoupReplacer(object):
     """Specifies tag name and class attribute changes during document parsing.
 
+    A ``SoupReplacer`` may be constructed in one of three ways:
+
+    1. ``SoupReplacer(og_tag, alt_tag)`` renames every ``og_tag`` to
+       ``alt_tag``.
+
+    2. ``SoupReplacer(tag, add_classes, remove_classes)`` adds
+       ``add_classes`` to, and removes ``remove_classes`` from, the ``class``
+       attribute of every ``tag``.
+
+    3. ``SoupReplacer(name_xformer=..., attrs_xformer=..., xformer=...)``
+       applies user-supplied transformer functions to every tag as it is
+       parsed. Each transformer takes the :py:class:`bs4.element.Tag` being
+       built. ``name_xformer`` returns a replacement tag name and
+       ``attrs_xformer`` returns a replacement attribute mapping, while
+       ``xformer`` modifies the tag in place and returns nothing.
+
     Attributes:
         og_tag: The name of the target tag to match during parsing.
         alt_tag: The replacement tag name, or None if the tag name should not
             change.
         add_classes: Classes to add to every matching tag.
         remove_classes: Classes to remove from every matching tag.
+        name_xformer: A function that takes a Tag and returns a replacement
+            name (or None to keep the name).
+        attrs_xformer: A function that takes a Tag and returns a replacement
+            attribute mapping.
+        xformer: A function that takes a Tag and modifies it in place.
     """
 
-    og_tag: str
+    og_tag: str | None
     alt_tag: str | None
     add_classes: list[str]
     remove_classes: list[str]
+    name_xformer: Callable[[Tag], str | None] | None
+    attrs_xformer: Callable[[Tag], _RawOrProcessedAttributeValues] | None
+    xformer: Callable[[Tag], None] | None
+    _name_mapping: Dict[str, str]
 
     @overload
     def __init__(self, og_tag: str, alt_tag: str) -> None:
@@ -730,17 +756,30 @@ class SoupReplacer(object):
     ) -> None:
         ...
 
+    @overload
     def __init__(
         self,
-        og_tag: str,
+        *,
+        name_xformer: Callable[[Tag], str | None] | None = None,
+        attrs_xformer: Callable[[Tag], _RawOrProcessedAttributeValues] | None = None,
+        xformer: Callable[[Tag], None] | None = None,
+    ) -> None:
+        ...
+
+    def __init__(
+        self,
+        og_tag: str | None = None,
         *args: Any,
         alt_tag: str | None = None,
         add_classes: str | Iterable[str] | None = None,
         remove_classes: str | Iterable[str] | None = None,
+        name_xformer: Callable[[Tag], str | None] | None = None,
+        attrs_xformer: Callable[[Tag], _RawOrProcessedAttributeValues] | None = None,
+        xformer: Callable[[Tag], None] | None = None,
     ):
         """Initializes a SoupReplacer for tag renaming and/or class modification.
 
-        The constructor may be called in either of two ways:
+        The constructor may be called in one of three ways:
 
         1. ``SoupReplacer(og_tag, alt_tag)`` renames every ``og_tag`` to
            ``alt_tag``.
@@ -748,6 +787,13 @@ class SoupReplacer(object):
         2. ``SoupReplacer(tag, add_classes, remove_classes)`` adds
            ``add_classes`` to, and removes ``remove_classes`` from, the
            ``class`` attribute of every ``tag``.
+
+        3. ``SoupReplacer(name_xformer, attrs_xformer, xformer)`` applies
+           transformer functions to every parsed tag. The transformers take
+           the tag being built as their argument. ``name_xformer`` returns a
+           replacement for the tag's name, ``attrs_xformer`` returns a
+           replacement for the tag's attributes, and ``xformer`` performs
+           arbitrary in-place changes to the tag and returns nothing.
 
         Args:
             og_tag: The name of the tag to match.
@@ -758,6 +804,12 @@ class SoupReplacer(object):
             remove_classes: Classes to remove from matching tags as a
                 whitespace string or iterable of strings, or "*" to remove all
                 classes. Defaults to None.
+            name_xformer: A function that takes a Tag and returns the name it
+                should have (or None to keep its current name).
+            attrs_xformer: A function that takes a Tag and returns the
+                attribute mapping it should have.
+            xformer: A function that takes a Tag and modifies it in place.
+                Its return value is ignored.
         """
         if len(args) == 1:
             alt_tag = args[0]
@@ -768,10 +820,24 @@ class SoupReplacer(object):
                 "SoupReplacer takes at most 3 positional arguments "
                 "(og_tag, alt_tag, add_classes, remove_classes)."
             )
+        if (
+            og_tag is None
+            and name_xformer is None
+            and attrs_xformer is None
+            and xformer is None
+        ):
+            raise TypeError(
+                "SoupReplacer requires either a tag name (og_tag) or at "
+                "least one of name_xformer, attrs_xformer, or xformer."
+            )
         self.og_tag = og_tag
         self.alt_tag = alt_tag
         self.add_classes = _split_classes(add_classes)
         self.remove_classes = _split_classes(remove_classes)
+        self.name_xformer = name_xformer
+        self.attrs_xformer = attrs_xformer
+        self.xformer = xformer
+        self._name_mapping = {}
 
     @classmethod
     def for_tag_replacement(cls, og_tag: str, alt_tag: str) -> SoupReplacer:
@@ -814,6 +880,10 @@ class SoupReplacer(object):
     def replace_tag_name(self, name: str) -> str:
         """Returns the tag name to use for a parsed tag.
 
+        This handles the string-based ``og_tag``/``alt_tag`` rename and is
+        called when a start tag is encountered. Tag-based ``name_xformer``
+        renames happen later, in :meth:`replace_tag`.
+
         Args:
             name: The parsed name of the tag.
 
@@ -823,6 +893,48 @@ class SoupReplacer(object):
         if name == self.og_tag and self.alt_tag is not None:
             return self.alt_tag
         return name
+
+    def replace_end_tag_name(self, name: str) -> str:
+        """Returns the tag name to match against for a parsed end tag.
+
+        A start tag that was renamed by ``name_xformer`` must have its end
+        tag renamed the same way, so the tree builder can find the matching
+        open tag on the stack.
+
+        Args:
+            name: The parsed name of the end tag.
+
+        Returns:
+            The name to look for when closing this end tag.
+        """
+        name = self.replace_tag_name(name)
+        if self.name_xformer is not None:
+            name = self._name_mapping.get(name, name)
+        return name
+
+    def replace_tag(self, tag: Tag) -> None:
+        """Applies any transformer functions to an already-created Tag.
+
+        This is called by ``BeautifulSoup`` after a ``Tag`` has been created
+        during parsing, but before it is added to the tree, so the
+        transformer functions can observe and modify the tag in place.
+
+        Args:
+            tag: The Tag that was just created for a parsed start tag.
+        """
+        if self.xformer is not None:
+            self.xformer(tag)
+
+        if self.name_xformer is not None:
+            original_name = tag.name
+            new_name = self.name_xformer(tag)
+            if new_name is not None and new_name != original_name:
+                self._name_mapping[original_name] = new_name
+                tag.name = new_name
+
+        if self.attrs_xformer is not None:
+            new_attrs = self.attrs_xformer(tag)
+            tag.attrs = type(tag.attrs)(new_attrs)
 
     def replace_class(self, name: str, attrs: _RawAttributeValues) -> None:
         """Modifies the class attribute of attrs in place if name matches.
@@ -862,11 +974,18 @@ class SoupReplacer(object):
             attrs["class"] = " ".join(classes)
 
     def __repr__(self) -> str:
-        tag_part = (
-            f"{self.og_tag}->{self.alt_tag}"
-            if self.alt_tag is not None
-            else f"tag={self.og_tag}"
-        )
+        if self.og_tag is None:
+            tag_part = (
+                f"name_xformer={self.name_xformer} "
+                f"attrs_xformer={self.attrs_xformer} "
+                f"xformer={self.xformer}"
+            )
+        else:
+            tag_part = (
+                f"{self.og_tag}->{self.alt_tag}"
+                if self.alt_tag is not None
+                else f"tag={self.og_tag}"
+            )
         return (
             f"<{self.__class__.__name__} {tag_part} "
             f"add_classes={self.add_classes} "

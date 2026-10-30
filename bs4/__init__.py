@@ -248,7 +248,10 @@ class BeautifulSoup(Tag):
          SoupReplacer's og_tag will be replaced, during parsing, with
          the SoupReplacer's alt_tag, and will have the SoupReplacer's
          remove_classes removed from its class attribute and its
-         add_classes added to its class attribute.
+         add_classes added to its class attribute. Alternatively, a
+         SoupReplacer constructed with name_xformer, attrs_xformer, or
+         xformer functions will apply those functions to each tag as it
+         is created during parsing.
 
         :param from_encoding: A string indicating the encoding of the
          document to be parsed. Pass this in if Beautiful Soup is
@@ -1059,6 +1062,8 @@ class BeautifulSoup(Tag):
         )
         if tag is None:
             return tag
+        if self.replacer is not None:
+            self.replacer.replace_tag(tag)
         if self._most_recent_element is not None:
             self._most_recent_element.next_element = tag
         self._most_recent_element = tag
@@ -1076,7 +1081,7 @@ class BeautifulSoup(Tag):
         # print("End tag: " + name)
         self.endData()
         if self.replacer is not None:
-            name = self.replacer.replace_tag_name(name)
+            name = self.replacer.replace_end_tag_name(name)
         self._popToTag(name, nsprefix)
 
     def handle_data(self, data: str) -> None:
