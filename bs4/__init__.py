@@ -503,6 +503,23 @@ class BeautifulSoup(Tag):
         self.markup = None
         self.builder.soup = None
 
+    def __iter__(self) -> Iterator[PageElement]:
+        """Iterate over this `BeautifulSoup` object and every node in its
+        parse tree.
+
+        Iterating over a `BeautifulSoup` object visits every node of the
+        tree exactly once, in document order (a depth-first, pre-order
+        traversal). The `BeautifulSoup` object itself is yielded first,
+        followed by each of its descendants.
+
+        Nodes are produced lazily, one at a time, so the tree is never
+        materialized into a list. This makes it possible to iterate over a
+        very large document without paying the memory cost of collecting
+        every node up front.
+        """
+        yield self
+        yield from self.descendants
+
     def copy_self(self) -> "BeautifulSoup":
         """Create a new BeautifulSoup object with the same TreeBuilder,
         but not associated with any markup.
